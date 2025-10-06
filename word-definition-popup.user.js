@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Smart Word Definition Popup
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
+// @version      1.2.1
 // @description  Automatically define selected words with adaptive theming
 // @author       doniwicaksono
 // @match        *://*/*
@@ -95,12 +95,13 @@
         const computed = window.getComputedStyle(div).color;
         document.body.removeChild(div);
 
-        const match = computed.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*[\d.]+)?\)$/);
+        const match = computed.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/);
         if (match) {
             return {
                 r: parseInt(match[1]),
                 g: parseInt(match[2]),
-                b: parseInt(match[3])
+                b: parseInt(match[3]),
+                a: match[4] ? parseFloat(match[4]) : 1
             };
         }
         return null;
@@ -115,11 +116,20 @@
         return a[0] * 0.2126 + a[1] * 0.7152 + a[2] * 0.0722;
     }
 
+    // Calculate contrast ratio between two colors
+    function getContrastRatio(rgb1, rgb2) {
+        const lum1 = getLuminance(rgb1.r, rgb1.g, rgb1.b);
+        const lum2 = getLuminance(rgb2.r, rgb2.g, rgb2.b);
+        const lighter = Math.max(lum1, lum2);
+        const darker = Math.min(lum1, lum2);
+        return (lighter + 0.05) / (darker + 0.05);
+    }
+
     // Get text color from selected element
     function getTextColor(element) {
         let el = element;
         let depth = 0;
-        const maxDepth = 10;
+        const maxDepth = 15;
 
         while (el && depth < maxDepth) {
             const textColor = window.getComputedStyle(el).color;
@@ -135,20 +145,25 @@
         return 'rgb(0, 0, 0)'; // Default fallback
     }
 
-    // Smart background color detection
+    // Smart background color detection with better traversal
     function getSmartBackgroundColor(element) {
         let el = element;
         let depth = 0;
-        const maxDepth = 10;
+        const maxDepth = 20; // Increased depth for complex layouts
+        const foundColors = [];
 
+        // Traverse up the DOM tree and collect all non-transparent backgrounds
         while (el && depth < maxDepth) {
             const bgColor = window.getComputedStyle(el).backgroundColor;
 
-            // Check if background is not transparent
             if (bgColor && bgColor !== 'rgba(0, 0, 0, 0)' && bgColor !== 'transparent') {
                 const rgb = parseColor(bgColor);
-                if (rgb) {
-                    return rgbToHex(rgb.r, rgb.g, rgb.b);
+                if (rgb && rgb.a > 0.1) { // Consider colors with some opacity
+                    foundColors.push({ color: bgColor, rgb: rgb, element: el });
+                    // If we found a solid color (high opacity), use it
+                    if (rgb.a >= 0.8) {
+                        return rgbToHex(rgb.r, rgb.g, rgb.b);
+                    }
                 }
             }
 
@@ -156,40 +171,70 @@
             depth++;
         }
 
-        // Fallback to body or html background
+        // If we found semi-transparent colors, use the first one
+        if (foundColors.length > 0) {
+            const rgb = foundColors[0].rgb;
+            return rgbToHex(rgb.r, rgb.g, rgb.b);
+        }
+
+        // Fallback to body background
         const bodyBg = window.getComputedStyle(document.body).backgroundColor;
         if (bodyBg && bodyBg !== 'rgba(0, 0, 0, 0)' && bodyBg !== 'transparent') {
             const rgb = parseColor(bodyBg);
             if (rgb) return rgbToHex(rgb.r, rgb.g, rgb.b);
         }
 
-        // Default fallback
-        return '#ffffff';
+        // Fallback to html background
+        const htmlBg = window.getComputedStyle(document.documentElement).backgroundColor;
+        if (htmlBg && htmlBg !== 'rgba(0, 0, 0, 0)' && htmlBg !== 'transparent') {
+            const rgb = parseColor(htmlBg);
+            if (rgb) return rgbToHex(rgb.r, rgb.g, rgb.b);
+        }
+
+        // Ultimate fallback - detect if page prefers dark mode
+        const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        return prefersDark ? '#1a1a1a' : '#ffffff';
     }
 
-    // Adjust color lightness for popup background
+    // Adjust color for better popup background
     function adjustColorForPopup(hexColor, isDark) {
         const rgb = parseColor(hexColor);
         if (!rgb) return hexColor;
 
         if (isDark) {
-            // Lighten slightly for dark backgrounds
-            return `rgb(${Math.min(rgb.r + 15, 255)}, ${Math.min(rgb.g + 15, 255)}, ${Math.min(rgb.b + 15, 255)})`;
+            // Lighten for dark backgrounds to create depth
+            return `rgb(${Math.min(rgb.r + 20, 255)}, ${Math.min(rgb.g + 20, 255)}, ${Math.min(rgb.b + 20, 255)})`;
         } else {
-            // Slightly darken or keep same for light backgrounds
-            return `rgb(${Math.max(rgb.r - 5, 0)}, ${Math.max(rgb.g - 5, 0)}, ${Math.max(rgb.b - 5, 0)})`;
+            // Slightly darken for light backgrounds
+            return `rgb(${Math.max(rgb.r - 10, 0)}, ${Math.max(rgb.g - 10, 0)}, ${Math.max(rgb.b - 10, 0)})`;
         }
+    }
+
+    // Ensure text has sufficient contrast with background
+    function ensureContrast(textColor, bgColor) {
+        const textRgb = parseColor(textColor);
+        const bgRgb = parseColor(bgColor);
+
+        if (!textRgb || !bgRgb) return textColor;
+
+        const contrastRatio = getContrastRatio(textRgb, bgRgb);
+
+        // WCAG AA requires 4.5:1 for normal text
+        if (contrastRatio < 4.5) {
+            // If contrast is poor, use black or white depending on background
+            const bgLuminance = getLuminance(bgRgb.r, bgRgb.g, bgRgb.b);
+            return bgLuminance > 0.5 ? 'rgb(0, 0, 0)' : 'rgb(255, 255, 255)';
+        }
+
+        return textColor;
     }
 
     // Get contrasting border color
     function getBorderColor(bgColor, isDark) {
-        const rgb = parseColor(bgColor);
-        if (!rgb) return isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.1)';
-
-        return isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.1)';
+        return isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.15)';
     }
 
-    // Apply theme to popup
+    // Apply theme to popup with enhanced contrast checking
     function applyTheme(element) {
         const bgColor = getSmartBackgroundColor(element);
         const textColor = getTextColor(element);
@@ -199,14 +244,27 @@
 
         const isDark = getLuminance(bgRgb.r, bgRgb.g, bgRgb.b) < 0.5;
         const popupBg = adjustColorForPopup(bgColor, isDark);
+
+        // Ensure text color has sufficient contrast with popup background
+        const adjustedTextColor = ensureContrast(textColor, popupBg);
+
         const borderColor = getBorderColor(popupBg, isDark);
-        const shadowColor = isDark ? 'rgba(0, 0, 0, 0.3)' : 'rgba(0, 0, 0, 0.15)';
+        const shadowColor = isDark ? 'rgba(0, 0, 0, 0.4)' : 'rgba(0, 0, 0, 0.15)';
 
         popup.style.background = popupBg;
-        popup.style.color = textColor;
+        popup.style.color = adjustedTextColor;
         popup.style.borderColor = borderColor;
         popup.style.border = `1px solid ${borderColor}`;
         popup.style.boxShadow = `0 4px 12px ${shadowColor}`;
+
+        // Debug log (remove in production)
+        console.log('Theme applied:', {
+            detectedBg: bgColor,
+            popupBg: popupBg,
+            originalText: textColor,
+            adjustedText: adjustedTextColor,
+            isDark: isDark
+        });
     }
 
     // Position popup smartly relative to cursor and viewport
